@@ -66,17 +66,31 @@ function extractContactInfo(contactMessage) {
     const displayName = contactMessage.displayName || 'Unknown';
     let vcard = contactMessage.vcard || '';
     
-    // Extract phone number from vcard
+    // Extract phone number from vcard - improved parsing
     let phoneNumber = 'Not available';
-    if (vcard.includes('TEL:')) {
-      const telMatch = vcard.match(/TEL[^:]*:([^\r\n]*)/);
-      if (telMatch && telMatch[1]) {
-        phoneNumber = telMatch[1].trim();
+    if (vcard) {
+      // Try multiple patterns to extract phone number
+      const phonePatterns = [
+        /TEL[;:][\s\S]*?([+0-9][0-9\s\-\(\)\.]{7,})/i,
+        /TEL[;:][\s\S]*?([0-9\s\-\(\)\.]{7,})/,
+        /TEL[;:][\s\S]*?([+][0-9]{1,3}[0-9\s\-\(\)\.]{7,})/,
+        /TEL[^:]*:([^\r\n]*)/
+      ];
+      
+      for (const pattern of phonePatterns) {
+        const match = vcard.match(pattern);
+        if (match && match[1]) {
+          phoneNumber = match[1].trim()
+            .replace(/\s+/g, '')
+            .replace(/[^\d+]/g, '');
+          if (phoneNumber.length > 3) break;
+        }
       }
     }
     
     return `👤 *Name:* ${displayName}\n📞 *Phone:* ${phoneNumber}`;
   } catch (e) {
+    console.error('Error parsing contact info:', e);
     return 'Could not parse contact information';
   }
 }
@@ -239,6 +253,19 @@ async function startBot() {
         kind = 'videoMessage';
       }
 
+      // Handle status updates that contain media
+      if (kind === 'senderKeyDistributionMessage') {
+        // Check if this is actually a status update with media
+        const mediaTypes = ['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage'];
+        for (const mediaType of mediaTypes) {
+          if (messageObj[mediaType]) {
+            console.log(`[delete_event] Detected status update with ${mediaType}`);
+            kind = mediaType;
+            break;
+          }
+        }
+      }
+
       const timestamp = new Date().toISOString();
       const sender = deletedMsg.key.participant || deletedMsg.key.remoteJid;
       const chat = deletedMsg.key.remoteJid;
@@ -249,11 +276,17 @@ async function startBot() {
       let mediaPath = null;
       let mediaBuffer = null;
 
-      // Extract text content
+      // Extract text content and captions
       if (kind === 'conversation') {
         textContent = messageObj.conversation;
       } else if (kind === 'extendedTextMessage') {
         textContent = messageObj.extendedTextMessage?.text || null;
+      } else if (kind === 'imageMessage') {
+        textContent = messageObj.imageMessage?.caption || null;
+      } else if (kind === 'videoMessage') {
+        textContent = messageObj.videoMessage?.caption || null;
+      } else if (kind === 'documentMessage') {
+        textContent = messageObj.documentMessage?.caption || null;
       }
 
       // If media, attempt to download and save locally
@@ -346,7 +379,11 @@ async function startBot() {
             }
             
             if (bufferToSend) {
-              const caption = `${header}\n\n${metadata}`;
+              // Include caption in the media message if available
+              let caption = `${header}\n\n${metadata}`;
+              if (textContent) {
+                caption += `\n\n📝 *Caption:* ${textContent}`;
+              }
               
               if (kind === 'imageMessage') {
                 await sock.sendMessage(OWNER_JID, { 
