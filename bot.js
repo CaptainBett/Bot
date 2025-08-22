@@ -58,6 +58,45 @@ function extractChatName(chatJid) {
   return 'Private: ' + chatJid.split('@')[0];
 }
 
+// Helper function to extract contact information
+function extractContactInfo(contactMessage) {
+  if (!contactMessage) return 'No contact information available';
+  
+  try {
+    const displayName = contactMessage.displayName || 'Unknown';
+    let vcard = contactMessage.vcard || '';
+    
+    // Extract phone number from vcard
+    let phoneNumber = 'Not available';
+    if (vcard.includes('TEL:')) {
+      const telMatch = vcard.match(/TEL[^:]*:([^\r\n]*)/);
+      if (telMatch && telMatch[1]) {
+        phoneNumber = telMatch[1].trim();
+      }
+    }
+    
+    return `👤 *Name:* ${displayName}\n📞 *Phone:* ${phoneNumber}`;
+  } catch (e) {
+    return 'Could not parse contact information';
+  }
+}
+
+// Helper function to extract live location information
+function extractLocationInfo(liveLocationMessage) {
+  if (!liveLocationMessage) return 'No location information available';
+  
+  try {
+    const lat = liveLocationMessage.degreesLatitude || 0;
+    const lon = liveLocationMessage.degreesLongitude || 0;
+    const accuracy = liveLocationMessage.accuracyInMeters || 0;
+    const speed = liveLocationMessage.speedInMps || 0;
+    
+    return `📍 *Live Location*\n• *Latitude:* ${lat}\n• *Longitude:* ${lon}\n• *Accuracy:* ${accuracy}m\n• *Speed:* ${speed}m/s\n• [Open in Google Maps](https://maps.google.com/?q=${lat},${lon})`;
+  } catch (e) {
+    return 'Could not parse location information';
+  }
+}
+
 async function startBot() {
   try {
     console.log('[startup] Opening DB:', DB_FILE);
@@ -189,8 +228,16 @@ async function startBot() {
 
       const deletedMsg = cached.raw;
       const { inner: messageObj } = unwrapMessage(deletedMsg.message);
-      const kind = Object.keys(messageObj || {})[0] || 'unknown';
+      let kind = Object.keys(messageObj || {})[0] || 'unknown';
       console.log('[delete_event] Recovered message type:', kind);
+
+      // Handle video notes (ptvMessage)
+      if (kind === 'messageContextInfo' && messageObj.messageContextInfo?.ptvMessage) {
+        console.log('[delete_event] Detected video note (ptvMessage)');
+        // Replace the message object with the ptvMessage content
+        messageObj.videoMessage = messageObj.messageContextInfo.ptvMessage;
+        kind = 'videoMessage';
+      }
 
       const timestamp = new Date().toISOString();
       const sender = deletedMsg.key.participant || deletedMsg.key.remoteJid;
@@ -242,7 +289,7 @@ async function startBot() {
             
             // For documents, use the original filename if available
             if (kind === 'documentMessage' && mediaData?.fileName) {
-              ext = path.extname(mediaData.fileName) || ext;
+              ext = path.extname(mediaData.fileName).substring(1) || ext;
             }
             
             const safeSender = String(sender).replace(/[^a-zA-Z0-9]/g, '_');
@@ -344,7 +391,22 @@ async function startBot() {
                 text: `${header}\n\n${metadata}\n\n❌ *Media file could not be recovered*` 
               });
             }
-          } else {
+          }
+          // 3) Contact messages
+          else if (kind === 'contactMessage') {
+            const contactInfo = extractContactInfo(messageObj.contactMessage);
+            await sock.sendMessage(OWNER_JID, { 
+              text: `${header}\n\n${metadata}\n\n${contactInfo}` 
+            });
+          }
+          // 4) Live location messages
+          else if (kind === 'liveLocationMessage') {
+            const locationInfo = extractLocationInfo(messageObj.liveLocationMessage);
+            await sock.sendMessage(OWNER_JID, { 
+              text: `${header}\n\n${metadata}\n\n${locationInfo}` 
+            });
+          }
+          else {
             // Unknown or complex type — send a preview
             await sock.sendMessage(OWNER_JID, { 
               text: `${header}\n\n${metadata}\n\n📋 *Preview:*\n${JSON.stringify(messageObj || {}).slice(0, 1000)}` 
