@@ -200,6 +200,7 @@ async function startBot() {
 
       let textContent = null;
       let mediaPath = null;
+      let mediaBuffer = null;
 
       // Extract text content
       if (kind === 'conversation') {
@@ -212,7 +213,7 @@ async function startBot() {
       const mediaTypes = ['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage'];
       if (mediaTypes.includes(kind)) {
         try {
-          const buffer = await downloadMediaMessage(
+          mediaBuffer = await downloadMediaMessage(
             deletedMsg, 
             'buffer', 
             {}, 
@@ -221,7 +222,7 @@ async function startBot() {
             }
           );
 
-          if (buffer) {
+          if (mediaBuffer) {
             const mediaData = messageObj[kind];
             let ext = 'bin';
             
@@ -239,10 +240,15 @@ async function startBot() {
               ext = extMap[kind] || 'bin';
             }
             
+            // For documents, use the original filename if available
+            if (kind === 'documentMessage' && mediaData?.fileName) {
+              ext = path.extname(mediaData.fileName) || ext;
+            }
+            
             const safeSender = String(sender).replace(/[^a-zA-Z0-9]/g, '_');
             const filename = `${Date.now()}_${safeSender}.${ext}`;
             const outPath = path.join(MEDIA_DIR, filename);
-            fs.writeFileSync(outPath, buffer);
+            fs.writeFileSync(outPath, mediaBuffer);
             mediaPath = outPath;
             console.log('[delete_event] Media saved to:', outPath);
           }
@@ -274,7 +280,7 @@ async function startBot() {
           const senderName = extractSenderName(sender);
           const chatName = extractChatName(chat);
           
-          const header = isStatus ? '🔔 *DELETED STATUS UPDATE* 🔔' : '🔔 *DELETED MESSAGE* 🔔';
+          const header = isStatus ? '🚨 *DELETED STATUS UPDATE* 🚨' : '🚨 *DELETED MESSAGE* 🚨';
           const metadata = `⏰ *Time:* ${formattedTime}\n👤 *From:* ${senderName}\n💬 *Chat:* ${chatName}\n📦 *Type:* ${kind}`;
 
           // 1) Text message or status text
@@ -286,24 +292,29 @@ async function startBot() {
           }
           // 2) Media (we saved it to disk)
           else if (mediaTypes.includes(kind)) {
-            if (mediaPath && fs.existsSync(mediaPath)) {
-              const buffer = fs.readFileSync(mediaPath);
+            // Use the buffer if available, otherwise read from disk
+            let bufferToSend = mediaBuffer;
+            if (!bufferToSend && mediaPath && fs.existsSync(mediaPath)) {
+              bufferToSend = fs.readFileSync(mediaPath);
+            }
+            
+            if (bufferToSend) {
               const caption = `${header}\n\n${metadata}`;
               
               if (kind === 'imageMessage') {
                 await sock.sendMessage(OWNER_JID, { 
-                  image: buffer, 
+                  image: bufferToSend, 
                   caption: caption
                 });
               } else if (kind === 'videoMessage') {
                 await sock.sendMessage(OWNER_JID, { 
-                  video: buffer, 
+                  video: bufferToSend, 
                   caption: caption
                 });
               } else if (kind === 'audioMessage') {
                 const mimetype = messageObj.audioMessage?.mimetype || 'audio/ogg; codecs=opus';
                 await sock.sendMessage(OWNER_JID, { 
-                  audio: buffer, 
+                  audio: bufferToSend, 
                   mimetype: mimetype,
                   ptt: false 
                 });
@@ -311,16 +322,19 @@ async function startBot() {
                 await sock.sendMessage(OWNER_JID, { text: `${header}\n\n${metadata}` });
               } else if (kind === 'stickerMessage') {
                 await sock.sendMessage(OWNER_JID, { 
-                  sticker: buffer
+                  sticker: bufferToSend
                 });
                 // Send metadata separately for stickers
                 await sock.sendMessage(OWNER_JID, { text: `${header}\n\n${metadata}` });
-              } else {
-                // documentMessage
-                const fileName = messageObj.documentMessage?.fileName || `document_${Date.now()}`;
+              } else if (kind === 'documentMessage') {
+                const mediaData = messageObj.documentMessage;
+                const fileName = mediaData?.fileName || `document_${Date.now()}`;
+                const mimetype = mediaData?.mimetype || 'application/octet-stream';
+                
                 await sock.sendMessage(OWNER_JID, { 
-                  document: buffer, 
+                  document: bufferToSend, 
                   fileName: fileName,
+                  mimetype: mimetype,
                   caption: caption
                 });
               }
